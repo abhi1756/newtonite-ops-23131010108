@@ -115,7 +115,8 @@ Errors use RFC 7807 `ProblemDetail` with an extra `code` field.
 | GET | `/api/items/{id}/comments` | Comments, cursor-paginated | |
 | POST | `/api/items/{id}/comments` | Add comment | `Idempotency-Key` |
 | GET | `/api/notifications` | My notifications | |
-| POST | `/api/notifications/{id}/read` | Mark read | |
+| POST | `/api/notifications/{id}/read` | Mark read | own notifications only |
+| POST | `/api/notifications/read-all` | Mark all read | |
 
 Dashboard `view` values:
 
