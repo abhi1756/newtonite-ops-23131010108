@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { errorMessage } from '../api/client';
@@ -20,13 +20,13 @@ export function LoginPage() {
   const location = useLocation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  const from = (location.state as { from?: string } | null)?.from ?? '/';
+  const from = location.state?.from ?? '/';
   if (token) return <Navigate to={from} replace />;
 
-  const submit = async (e: FormEvent) => {
+  const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
     setError(null);

@@ -1,10 +1,9 @@
-import { useState, type FormEvent } from 'react';
+import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, errorMessage, isNetworkError, newIdempotencyKey } from '../api/client';
 import { keys, useActivity, useComments, useItem, useItemMutation, useTeamMembers } from '../api/hooks';
-import type { ActivityEntry, ItemType, Priority, Status, TransitionOption, WorkItemDetail } from '../api/types';
-import { ITEM_TYPES, PRIORITIES } from '../api/types';
+import { ITEM_TYPES, PRIORITIES } from '../api/model';
 import { useAuth } from '../auth/AuthContext';
 import { PriorityBadge, StatusBadge } from '../components/Badges';
 import { dateTime, fromLocalInput, label, timeAgo, toLocalInput } from '../lib/format';
@@ -27,27 +26,28 @@ export function ItemDetailPage() {
   return <ItemView item={item} />;
 }
 
-function ItemView({ item }: { item: WorkItemDetail }) {
+/** @param {{ item: import('../api/model').WorkItemDetail }} props */
+function ItemView({ item }) {
   const { me } = useAuth();
   const [editing, setEditing] = useState(false);
   const p = item.permissions;
 
-  const claim = useItemMutation<void>(
+  const claim = useItemMutation(
     item.id,
-    (_v, key) => api(`/items/${item.id}/claim`, { method: 'POST', idempotencyKey: key }),
+    (_vars, key) => api(`/items/${item.id}/claim`, { method: 'POST', idempotencyKey: key }),
     (current) => ({
       ...current,
       assignee: me ? { id: me.id, name: me.displayName } : current.assignee,
       permissions: { ...current.permissions, canClaim: false },
     }),
   );
-  const transition = useItemMutation<{ to: Status; note?: string; version: number }>(
+  const transition = useItemMutation(
     item.id,
-    (v, key) => api(`/items/${item.id}/transition`, { method: 'POST', body: v, idempotencyKey: key }),
-    (current, v) => ({ ...current, status: v.to, permissions: { ...current.permissions, transitions: [] } }),
+    (vars, key) => api(`/items/${item.id}/transition`, { method: 'POST', body: vars, idempotencyKey: key }),
+    (current, vars) => ({ ...current, status: vars.to, permissions: { ...current.permissions, transitions: [] } }),
   );
-  const assign = useItemMutation<{ assigneeId: number | null; version: number }>(item.id, (v, key) =>
-    api(`/items/${item.id}/assign`, { method: 'POST', body: v, idempotencyKey: key }),
+  const assign = useItemMutation(item.id, (vars, key) =>
+    api(`/items/${item.id}/assign`, { method: 'POST', body: vars, idempotencyKey: key }),
   );
 
   const failures = [claim, transition, assign].filter((m) => m.error);
@@ -113,7 +113,11 @@ function ItemView({ item }: { item: WorkItemDetail }) {
             {p.canEdit && !editing && <button onClick={() => setEditing(true)}>Edit</button>}
           </div>
           {p.canAssign && (
-            <AssignControl item={item} busy={assign.isPending} onAssign={(assigneeId) => assign.run({ assigneeId, version: item.version })} />
+            <AssignControl
+              item={item}
+              busy={assign.isPending}
+              onAssign={(assigneeId) => assign.run({ assigneeId, version: item.version })}
+            />
           )}
           {!p.canClaim && !p.canEdit && p.transitions.length === 0 && !p.canAssign && (
             <p className="muted small">You can view this item but your role does not allow changes.</p>
@@ -136,7 +140,7 @@ function ItemView({ item }: { item: WorkItemDetail }) {
   );
 }
 
-function TransitionButton({ option, busy, onRun }: { option: TransitionOption; busy: boolean; onRun: (note?: string) => void }) {
+function TransitionButton({ option, busy, onRun }) {
   const [asking, setAsking] = useState(false);
   const [note, setNote] = useState('');
   if (!option.noteRequired) {
@@ -166,7 +170,7 @@ function TransitionButton({ option, busy, onRun }: { option: TransitionOption; b
   );
 }
 
-function AssignControl({ item, busy, onAssign }: { item: WorkItemDetail; busy: boolean; onAssign: (id: number | null) => void }) {
+function AssignControl({ item, busy, onAssign }) {
   const members = useTeamMembers(item.teamId, true);
   const candidates = (members.data ?? []).filter((m) => m.role !== 'VIEWER');
   return (
@@ -190,15 +194,8 @@ function AssignControl({ item, busy, onAssign }: { item: WorkItemDetail; busy: b
   );
 }
 
-interface Draft {
-  title: string;
-  description: string;
-  type: ItemType;
-  priority: Priority;
-  due: string;
-}
-
-function draftOf(item: WorkItemDetail): Draft {
+/** The editable fields of an item, as form values. */
+function draftOf(item) {
   return {
     title: item.title,
     description: item.description,
@@ -214,13 +211,13 @@ function draftOf(item: WorkItemDetail): Draft {
  * offers to re-apply it on the latest version. Because only changed fields are sent, re-applying cannot
  * silently undo the other person's edits to fields this user never touched.
  */
-function EditForm({ item, onDone }: { item: WorkItemDetail; onDone: () => void }) {
+function EditForm({ item, onDone }) {
   const [baseVersion, setBaseVersion] = useState(item.version);
   const [initial] = useState(() => draftOf(item));
-  const [draft, setDraft] = useState<Draft>(initial);
-  const changed = (Object.keys(draft) as (keyof Draft)[]).filter((k) => draft[k] !== initial[k]);
+  const [draft, setDraft] = useState(initial);
+  const changed = Object.keys(draft).filter((k) => draft[k] !== initial[k]);
 
-  const save = useItemMutation<{ changes: Partial<Draft>; version: number }>(
+  const save = useItemMutation(
     item.id,
     ({ changes, version }, key) =>
       api(`/items/${item.id}`, {
@@ -237,22 +234,23 @@ function EditForm({ item, onDone }: { item: WorkItemDetail; onDone: () => void }
         },
       }),
     (current, { changes }) => {
-      const { due: _ignored, ...fields } = changes;
+      const fields = { ...changes };
+      delete fields.due; // the form value; the cached item uses dueAt and is refreshed from the response
       return { ...current, ...fields };
     },
   );
   const conflict = save.error instanceof ApiError && save.error.code === 'STALE_VERSION';
 
-  const submit = (e: FormEvent) => {
+  const submit = (e) => {
     e.preventDefault();
     if (changed.length === 0) {
       onDone();
       return;
     }
-    const changes: Partial<Draft> = Object.fromEntries(changed.map((k) => [k, draft[k]]));
+    const changes = Object.fromEntries(changed.map((k) => [k, draft[k]]));
     save.mutate({ vars: { changes, version: baseVersion }, key: newIdempotencyKey() }, { onSuccess: onDone });
   };
-  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
+  const set = (key, value) => setDraft((d) => ({ ...d, [key]: value }));
 
   return (
     <form className="edit-form" onSubmit={submit}>
@@ -262,7 +260,13 @@ function EditForm({ item, onDone }: { item: WorkItemDetail; onDone: () => void }
           changes; your draft below is kept. Saving again applies only the fields you changed
           ({changed.map(label).join(', ') || 'none'}).
           <div className="actions">
-            <button type="button" onClick={() => { setBaseVersion(item.version); save.reset(); }}>
+            <button
+              type="button"
+              onClick={() => {
+                setBaseVersion(item.version);
+                save.reset();
+              }}
+            >
               Keep my draft and review again
             </button>
             <button type="button" className="link" onClick={onDone}>
@@ -280,7 +284,7 @@ function EditForm({ item, onDone }: { item: WorkItemDetail; onDone: () => void }
       <div className="row">
         <label>
           Type
-          <select value={draft.type} onChange={(e) => set('type', e.target.value as ItemType)}>
+          <select value={draft.type} onChange={(e) => set('type', e.target.value)}>
             {ITEM_TYPES.map((t) => (
               <option key={t} value={t}>
                 {label(t)}
@@ -290,7 +294,7 @@ function EditForm({ item, onDone }: { item: WorkItemDetail; onDone: () => void }
         </label>
         <label>
           Priority
-          <select value={draft.priority} onChange={(e) => set('priority', e.target.value as Priority)}>
+          <select value={draft.priority} onChange={(e) => set('priority', e.target.value)}>
             {PRIORITIES.map((p) => (
               <option key={p} value={p}>
                 {label(p)}
@@ -319,15 +323,14 @@ function EditForm({ item, onDone }: { item: WorkItemDetail; onDone: () => void }
   );
 }
 
-function Comments({ itemId, canComment }: { itemId: number; canComment: boolean }) {
+function Comments({ itemId, canComment }) {
   const comments = useComments(itemId);
   const qc = useQueryClient();
   const [body, setBody] = useState('');
   const [key, setKey] = useState(newIdempotencyKey);
   const add = useMutation({
     // The key is fixed for this draft, so a retry after a network error cannot post the comment twice.
-    mutationFn: (text: string) =>
-      api(`/items/${itemId}/comments`, { method: 'POST', body: { body: text }, idempotencyKey: key }),
+    mutationFn: (text) => api(`/items/${itemId}/comments`, { method: 'POST', body: { body: text }, idempotencyKey: key }),
     retry: (count, error) => isNetworkError(error) && count < 2,
     onSuccess: () => {
       setBody('');
@@ -372,7 +375,7 @@ function Comments({ itemId, canComment }: { itemId: number; canComment: boolean 
   );
 }
 
-function Activity({ itemId }: { itemId: number }) {
+function Activity({ itemId }) {
   const activity = useActivity(itemId);
   const events = activity.data?.pages.flatMap((p) => p.items) ?? [];
   return (
@@ -396,8 +399,9 @@ function Activity({ itemId }: { itemId: number }) {
   );
 }
 
-function describe(e: ActivityEntry): string {
-  const d = e.data as Record<string, string | null | Record<string, unknown>>;
+/** Human-readable sentence for one activity event (see ActivityService on the server for the data shapes). */
+function describe(e) {
+  const d = e.data;
   switch (e.type) {
     case 'CREATED':
       return 'created this item';
@@ -405,11 +409,11 @@ function describe(e: ActivityEntry): string {
       if (d.via === 'CLAIM') return 'claimed it';
       return d.toName ? `assigned it to ${d.toName}${d.fromName ? ` (was ${d.fromName})` : ''}` : `unassigned ${d.fromName}`;
     case 'STATUS_CHANGED':
-      return `moved it from ${label(String(d.from))} to ${label(String(d.to))}${d.note ? `: "${d.note}"` : ''}`;
+      return `moved it from ${label(d.from)} to ${label(d.to)}${d.note ? `: "${d.note}"` : ''}`;
     case 'PRIORITY_CHANGED':
-      return `changed priority from ${label(String(d.from))} to ${label(String(d.to))}`;
+      return `changed priority from ${label(d.from)} to ${label(d.to)}`;
     case 'UPDATED':
-      return `edited ${Object.keys((d.changes as Record<string, unknown>) ?? {}).join(', ')}`;
+      return `edited ${Object.keys(d.changes ?? {}).join(', ')}`;
     case 'COMMENTED':
       return `commented: "${d.excerpt}"`;
     default:

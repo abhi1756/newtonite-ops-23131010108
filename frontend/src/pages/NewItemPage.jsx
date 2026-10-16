@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage, isNetworkError, newIdempotencyKey } from '../api/client';
-import { ITEM_TYPES, PRIORITIES, type ItemType, type Priority, type WorkItemDetail } from '../api/types';
+import { ITEM_TYPES, PRIORITIES } from '../api/model';
 import { useAuth } from '../auth/AuthContext';
 import { fromLocalInput, label } from '../lib/format';
 
@@ -12,18 +12,18 @@ export function NewItemPage() {
   const qc = useQueryClient();
   const teams = (me?.teams ?? []).filter((t) => t.role !== 'VIEWER');
 
-  const [teamId, setTeamId] = useState<number | ''>('');
+  const [teamId, setTeamId] = useState('');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [type, setType] = useState<ItemType>('TASK');
-  const [priority, setPriority] = useState<Priority>('MEDIUM');
+  const [type, setType] = useState('TASK');
+  const [priority, setPriority] = useState('MEDIUM');
   const [due, setDue] = useState('');
   // One key per form: a double submit or a retry after a timeout cannot create two items.
   const [idempotencyKey] = useState(newIdempotencyKey);
 
   const create = useMutation({
     mutationFn: () =>
-      api<WorkItemDetail>('/items', {
+      api('/items', {
         method: 'POST',
         idempotencyKey,
         body: { teamId: teamId || teams[0]?.id, title, description, type, priority, dueAt: fromLocalInput(due) },
@@ -36,7 +36,7 @@ export function NewItemPage() {
     },
   });
 
-  const submit = (e: FormEvent) => {
+  const submit = (e) => {
     e.preventDefault();
     create.mutate();
   };
@@ -66,7 +66,7 @@ export function NewItemPage() {
       <div className="row">
         <label>
           Type
-          <select value={type} onChange={(e) => setType(e.target.value as ItemType)}>
+          <select value={type} onChange={(e) => setType(e.target.value)}>
             {ITEM_TYPES.map((t) => (
               <option key={t} value={t}>
                 {label(t)}
@@ -76,7 +76,7 @@ export function NewItemPage() {
         </label>
         <label>
           Priority
-          <select value={priority} onChange={(e) => setPriority(e.target.value as Priority)}>
+          <select value={priority} onChange={(e) => setPriority(e.target.value)}>
             {PRIORITIES.map((p) => (
               <option key={p} value={p}>
                 {label(p)}

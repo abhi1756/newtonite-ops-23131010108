@@ -9,9 +9,9 @@ const TILES = [
   { key: 'unassignedUrgent', label: 'Unassigned urgent', view: 'unassigned_urgent' },
   { key: 'awaitingMyApproval', label: 'Awaiting my approval', view: 'awaiting_my_approval' },
   { key: 'overdue', label: 'Overdue', view: 'overdue' },
-] as const;
+];
 
-function Panel({ title, view }: { title: string; view: string }) {
+function Panel({ title, view }) {
   const { data, isLoading, error } = useItems({ view }, 5);
   const items = data?.pages[0]?.items ?? [];
   return (
@@ -20,7 +20,13 @@ function Panel({ title, view }: { title: string; view: string }) {
         <h2>{title}</h2>
         <Link to={`/items?view=${view}`}>View all</Link>
       </div>
-      {isLoading ? <p className="muted pad">Loading...</p> : error ? <div className="alert error">{errorMessage(error)}</div> : <ItemTable items={items} compact />}
+      {isLoading ? (
+        <p className="muted pad">Loading...</p>
+      ) : error ? (
+        <div className="alert error">{errorMessage(error)}</div>
+      ) : (
+        <ItemTable items={items} compact />
+      )}
     </section>
   );
 }

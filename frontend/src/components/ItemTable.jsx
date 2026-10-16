@@ -1,9 +1,9 @@
 import { Link } from 'react-router-dom';
-import type { WorkItemSummary } from '../api/types';
 import { label, timeAgo } from '../lib/format';
 import { PriorityBadge, StatusBadge } from './Badges';
 
-export function ItemTable({ items, compact = false }: { items: WorkItemSummary[]; compact?: boolean }) {
+/** @param {{ items: import('../api/model').WorkItemSummary[], compact?: boolean }} props */
+export function ItemTable({ items, compact = false }) {
   if (items.length === 0) {
     return <p className="muted pad">No matching work items.</p>;
   }

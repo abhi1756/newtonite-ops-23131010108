@@ -1,5 +1,4 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import type { ReactNode } from 'react';
 import { useAuth } from './auth/AuthContext';
 import { Layout } from './components/Layout';
 import { LoginPage } from './pages/LoginPage';
@@ -8,13 +7,13 @@ import { ItemsPage } from './pages/ItemsPage';
 import { ItemDetailPage } from './pages/ItemDetailPage';
 import { NewItemPage } from './pages/NewItemPage';
 
-function RequireAuth({ children }: { children: ReactNode }) {
+function RequireAuth({ children }) {
   const { token } = useAuth();
   const location = useLocation();
   if (!token) {
     return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
   }
-  return <>{children}</>;
+  return children;
 }
 
 export function App() {

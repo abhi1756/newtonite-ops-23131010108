@@ -1,12 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
 import { api } from './client';
 import { keys, useItemMutation } from './hooks';
-import type { WorkItemDetail } from './types';
 
-const item: WorkItemDetail = {
+const item = {
   id: 1,
   teamId: 1,
   teamName: 'Payments',
@@ -23,17 +21,17 @@ const item: WorkItemDetail = {
   permissions: { canEdit: true, canClaim: true, canAssign: false, canComment: true, transitions: [] },
 };
 
-function jsonResponse(status: number, body: unknown) {
+function jsonResponse(status, body) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
 function setup() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   qc.setQueryData(keys.item(1), item);
-  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  const wrapper = ({ children }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
   const { result } = renderHook(
     () =>
-      useItemMutation<{ priority: 'URGENT' }>(
+      useItemMutation(
         1,
         (v, key) => api(`/items/1`, { method: 'PATCH', body: { ...v, version: 3 }, idempotencyKey: key }),
         (current, v) => ({ ...current, priority: v.priority }),
@@ -47,17 +45,17 @@ describe('useItemMutation', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('shows the change immediately and rolls it back when the server refuses', async () => {
-    let respond!: (r: Response) => void;
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => (respond = resolve))));
+    let respond;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => (respond = resolve))));
     const { qc, result } = setup();
 
     act(() => result.current.run({ priority: 'URGENT' }));
-    await waitFor(() => expect(qc.getQueryData<WorkItemDetail>(keys.item(1))?.priority).toBe('URGENT'));
+    await waitFor(() => expect(qc.getQueryData(keys.item(1))?.priority).toBe('URGENT'));
 
     respond(jsonResponse(403, { code: 'FORBIDDEN', detail: 'Only the assignee can edit this item' }));
 
     await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(qc.getQueryData<WorkItemDetail>(keys.item(1))?.priority).toBe('HIGH');
+    expect(qc.getQueryData(keys.item(1))?.priority).toBe('HIGH');
     expect(result.current.error?.message).toBe('Only the assignee can edit this item');
   });
 
@@ -69,7 +67,7 @@ describe('useItemMutation', () => {
     act(() => result.current.run({ priority: 'URGENT' }));
 
     await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(qc.getQueryData<WorkItemDetail>(keys.item(1))).toEqual(latest);
+    expect(qc.getQueryData(keys.item(1))).toEqual(latest);
   });
 
   it('retries a network failure with the same idempotency key', async () => {
@@ -84,8 +82,8 @@ describe('useItemMutation', () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 4000 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    const keyOf = (call: number) => (fetchMock.mock.calls[call][1] as RequestInit).headers as Record<string, string>;
-    expect(keyOf(0)['Idempotency-Key']).toBeTruthy();
-    expect(keyOf(1)['Idempotency-Key']).toBe(keyOf(0)['Idempotency-Key']);
+    const keyOf = (call) => fetchMock.mock.calls[call][1].headers['Idempotency-Key'];
+    expect(keyOf(0)).toBeTruthy();
+    expect(keyOf(1)).toBe(keyOf(0));
   });
 });

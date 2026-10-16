@@ -1,21 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useItems } from '../api/hooks';
-import { ITEM_TYPES, PRIORITIES, STATUSES, type ItemFilter } from '../api/types';
+import { ITEM_TYPES, PRIORITIES, STATUSES } from '../api/model';
 import { useAuth } from '../auth/AuthContext';
 import { ItemTable } from '../components/ItemTable';
 import { errorMessage } from '../api/client';
 import { label } from '../lib/format';
 
-const FILTER_KEYS = ['view', 'teamId', 'status', 'priority', 'type', 'assignee', 'q'] as const;
+const FILTER_KEYS = ['view', 'teamId', 'status', 'priority', 'type', 'assignee', 'q'];
 const ACTIVE = 'OPEN,IN_PROGRESS,AWAITING_APPROVAL';
 
 /** All filters live in the URL, so a filtered view can be bookmarked or shared. */
 export function ItemsPage() {
   const { me } = useAuth();
   const [params, setParams] = useSearchParams();
-  const filter: ItemFilter = useMemo(() => {
-    const f: ItemFilter = {};
+  const filter = useMemo(() => {
+    const f = {};
     FILTER_KEYS.forEach((k) => {
       const v = params.get(k);
       if (v) f[k] = v;
@@ -33,7 +33,7 @@ export function ItemsPage() {
     return () => clearTimeout(handle);
   }, [search]);
 
-  const update = (key: keyof ItemFilter, value: string) => {
+  const update = (key, value) => {
     const next = new URLSearchParams(params);
     if (value) next.set(key, value);
     else next.delete(key);

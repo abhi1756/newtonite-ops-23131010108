@@ -1,22 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, tokenStore } from '../api/client';
 import { useMe } from '../api/hooks';
-import type { Me, TeamRole } from '../api/types';
 
-interface AuthState {
-  token: string | null;
-  me: Me | undefined;
-  login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
-  /** Effective role in a team, for showing or hiding controls. The server enforces the real rules. */
-  roleIn: (teamId: number) => TeamRole | undefined;
-}
+const AuthContext = createContext(null);
 
-const AuthContext = createContext<AuthState | null>(null);
-
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => tokenStore.get());
+export function AuthProvider({ children }) {
+  const [token, setToken] = useState(() => tokenStore.get());
   const qc = useQueryClient();
   const meQuery = useMe(token !== null);
 
@@ -34,8 +24,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [logout]);
 
   const login = useCallback(
-    async (email: string, password: string) => {
-      const result = await api<{ token: string }>('/auth/login', { method: 'POST', body: { email, password } });
+    async (email, password) => {
+      const result = await api('/auth/login', { method: 'POST', body: { email, password } });
       tokenStore.set(result.token);
       qc.clear();
       setToken(result.token);
@@ -43,12 +33,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [qc],
   );
 
-  const value = useMemo<AuthState>(
+  const value = useMemo(
     () => ({
       token,
       me: meQuery.data,
       login,
       logout,
+      /** Effective role in a team, for showing or hiding controls. The server enforces the real rules. */
       roleIn: (teamId) => meQuery.data?.teams.find((t) => t.id === teamId)?.role,
     }),
     [token, meQuery.data, login, logout],
@@ -57,7 +48,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-export function useAuth(): AuthState {
+export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used inside AuthProvider');
   return ctx;

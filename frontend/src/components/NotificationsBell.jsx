@@ -13,7 +13,7 @@ export function NotificationsBell() {
 
   const refresh = () => qc.invalidateQueries({ queryKey: keys.notifications });
 
-  const openNotification = async (id: number, itemId?: number) => {
+  const openNotification = async (id, itemId) => {
     setOpen(false);
     await api(`/notifications/${id}/read`, { method: 'POST' }).catch(() => undefined);
     refresh();

@@ -3,14 +3,14 @@
 const TOKEN_KEY = 'newtonite.token';
 
 export const tokenStore = {
-  get(): string | null {
+  get() {
     try {
       return localStorage.getItem(TOKEN_KEY);
     } catch {
       return null;
     }
   },
-  set(token: string) {
+  set(token) {
     try {
       localStorage.setItem(TOKEN_KEY, token);
     } catch {
@@ -28,37 +28,32 @@ export const tokenStore = {
 
 /** A response the server rejected. `code` is the machine-readable reason from the problem+json body. */
 export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-    readonly body?: Record<string, unknown>,
-  ) {
+  constructor(status, code, message, body) {
     super(message);
+    this.status = status;
+    this.code = code;
+    this.body = body;
   }
 }
 
 /** fetch() throws TypeError when the request never got a response (offline, connection reset). */
-export function isNetworkError(error: unknown): boolean {
+export function isNetworkError(error) {
   return error instanceof TypeError;
 }
 
-export function newIdempotencyKey(): string {
+export function newIdempotencyKey() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
-interface RequestOptions {
-  method?: string;
-  body?: unknown;
-  idempotencyKey?: string;
-  signal?: AbortSignal;
-}
-
-export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
+/**
+ * @param {string} path API path after /api, e.g. "/items/5"
+ * @param {{ method?: string, body?: unknown, idempotencyKey?: string, signal?: AbortSignal }} [options]
+ */
+export async function api(path, options = {}) {
+  const headers = { Accept: 'application/json' };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   const token = tokenStore.get();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -77,25 +72,25 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   }
 
   const text = await response.text();
-  let data: unknown;
+  let data;
   try {
     data = text ? JSON.parse(text) : undefined;
   } catch {
     data = undefined;
   }
   if (!response.ok) {
-    const problem = (data ?? {}) as Record<string, unknown>;
+    const problem = data ?? {};
     throw new ApiError(
       response.status,
-      (problem.code as string) ?? `HTTP_${response.status}`,
-      (problem.detail as string) ?? response.statusText ?? 'Request failed',
+      problem.code ?? `HTTP_${response.status}`,
+      problem.detail ?? response.statusText ?? 'Request failed',
       problem,
     );
   }
-  return data as T;
+  return data;
 }
 
-export function errorMessage(error: unknown): string {
+export function errorMessage(error) {
   if (error instanceof ApiError) return error.message;
   if (isNetworkError(error)) return 'Cannot reach the server. Check your connection and try again.';
   return error instanceof Error ? error.message : 'Something went wrong';
