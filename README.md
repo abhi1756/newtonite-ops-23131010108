@@ -15,6 +15,7 @@ Prerequisite: Docker Desktop.
 docker compose up --build
 ```
 
+* **App: http://localhost:3000** (log in with a demo user below)
 * API: http://localhost:8081 (health: `/actuator/health`, API docs: `/api/docs`)
 * PostgreSQL: `localhost:5433` (user/password `newtonite`)
 
@@ -23,6 +24,19 @@ Quick check:
 ```bash
 curl -s -X POST localhost:8081/api/auth/login -H "Content-Type: application/json" -d '{"email":"alice@newtonite.test","password":"demo1234"}'
 ```
+
+### Frontend development (hot reload)
+
+Prerequisite: Node.js 20.19+.
+
+```bash
+docker compose up -d db api
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:5173. Vite proxies `/api` to the API on port 8081.
 
 ## Tests
 
@@ -37,7 +51,17 @@ The suite drives the real HTTP API against a real PostgreSQL and covers the risk
 simultaneous claims (exactly one winner), stale and simultaneous edits, duplicate and
 concurrent requests with the same `Idempotency-Key`, workflow and approval rules,
 per-team authorization (404 for outsiders, 403 for insufficient roles), complete history,
-and cursor pagination while new items arrive.
+cursor pagination while new items arrive, and the outbox worker (redelivery, retry and
+parking, parallel workers).
+
+Frontend tests (optimistic update rollback, conflict reconciliation, retries reusing the
+same idempotency key):
+
+```bash
+cd frontend
+npm install
+npm test
+```
 
 ## Demo users
 

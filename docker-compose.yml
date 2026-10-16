@@ -28,5 +28,12 @@ services:
       db:
         condition: service_healthy
 
+  web:
+    build: ./frontend
+    ports:
+      - "${WEB_PORT:-3000}:80"
+    depends_on:
+      - api
+
 volumes:
   db-data:
