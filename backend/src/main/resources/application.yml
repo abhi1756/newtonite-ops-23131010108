@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: newtonite-ops
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/newtonite}
+    username: ${DB_USER:newtonite}
+    password: ${DB_PASSWORD:newtonite}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+  jpa:
+    open-in-view: false        # no lazy loading during view rendering; keeps transactions short
+    hibernate:
+      ddl-auto: validate       # Flyway owns the schema; Hibernate only checks it
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+  flyway:
+    # db/seed holds demo data; tests use only db/migration
+    locations: ${FLYWAY_LOCATIONS:classpath:db/migration,classpath:db/seed}
+  jackson:
+    default-property-inclusion: non_null
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${PORT:8081}
+  shutdown: graceful
+
+app:
+  jwt:
+    # Dev-only default so the project runs out of the box. Override APP_JWT_SECRET in any real deployment.
+    secret: ${APP_JWT_SECRET:dev-only-insecure-secret-change-me-0123456789abcdef}
+    ttl: ${APP_JWT_TTL:8h}
+  outbox:
+    enabled: ${OUTBOX_ENABLED:true}
+    poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:1000}
+    batch-size: 20
+  idempotency:
+    retention: 24h
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+springdoc:
+  swagger-ui:
+    path: /api/docs
+  api-docs:
+    path: /api/docs/openapi.json
