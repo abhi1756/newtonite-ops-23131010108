@@ -82,7 +82,9 @@ succeeded": double clicks, retries after a timeout, flaky networks.
 
 **Decision.** Every mutating endpoint accepts an `Idempotency-Key` header; the browser generates
 one per user intent and reuses it for automatic retries. The server inserts
-`(user_id, key, request_hash)` with `ON CONFLICT DO NOTHING`, runs the action and stores the
+`(user_id, key, request_hash)` with `ON CONFLICT DO NOTHING` (the one native query in the project,
+because JPA has no "insert if absent" and a failed `persist` aborts the whole transaction), runs the
+action and stores the
 response, all in one transaction. A concurrent duplicate blocks on the unique index until the
 first commits, then replays the stored response (`Idempotent-Replayed: true`). The same key with a
 different body is rejected with 422. If the action fails, the key rolls back with it, so a retry
@@ -139,23 +141,26 @@ what happens when async work fails, runs twice or is delayed.
 - **A Postgres `outbox_jobs` table written in the business transaction and drained by a worker.**
 
 **Decision.** The outbox row commits atomically with the change. A `@Scheduled` worker claims one
-job at a time with `FOR UPDATE SKIP LOCKED` (several instances never take the same job), runs the
-handler and marks it `DONE` in **one transaction**. If the process dies halfway, the transaction
+job at a time with a JPA `PESSIMISTIC_WRITE` lock plus Hibernate's skip-locked hint (rendered as
+`FOR NO KEY UPDATE SKIP LOCKED`), so several instances never take the same job and none waits for
+another. It runs the handler and marks the job `DONE` in **one transaction**. If the process dies halfway, the transaction
 rolls back and the job is retried. Failures are recorded in a separate transaction with exponential
 backoff (2s, 4s, ... capped at 5 min), and after `max_attempts` the job is parked as `FAILED` so a
-poison message cannot block the queue. Delivery is at-least-once, so handlers are idempotent: a
-notification is unique per `(source_job_id, user_id)`.
+poison message cannot block the queue. Delivery is at-least-once, so handlers are idempotent: the
+notification handler skips a user this job already notified (race-free, because the job row is
+locked while it runs), and a unique `(source_job_id, user_id)` constraint backs that up.
 
 **Trade-offs.** Holding the job's transaction open while the handler runs is fine for database-only
 handlers, but an external call (email, webhook) would need a different pattern (mark in-flight,
 call, then confirm). Polling adds up to one second of delay. A job that crashes the whole JVM is
 retried without its attempt count increasing.
 
-**Where.** `OutboxWorker`, `NotificationHandlers`. Tests: `OutboxWorkerTest`.
+**Where.** `OutboxWorker`, `OutboxJobRepository.lockDue`, `NotificationHandlers`. Tests: `OutboxWorkerTest`
+(including one proving a locked job is skipped rather than waited for).
 
 ---
 
-## 6. Reads at scale: keyset pagination and Postgres full-text search, with SQL for reads and JPA for writes
+## 6. Reads at scale: keyset pagination and Postgres full-text search, all through JPA/Hibernate
 
 **Context.** Tens of thousands of active items and an ever-growing history; the browser must never
 load everything, and the server must not filter in memory.
@@ -170,17 +175,24 @@ load everything, and the server must not filter in memory.
 so each page is an index range scan of constant cost and stays correct while new items arrive.
 Search uses a generated `tsvector` column (title weighted above description) with a GIN index;
 `#123` matches the id. Dashboard views (`mine`, `unassigned_urgent`, `awaiting_my_approval`,
-`overdue`) are server-side filters with matching (partial) indexes. Work-item writes use a JPA
-entity, for `@Version` and simple mutation code; append-only inserts (history, comments, outbox)
-and all list and search queries are explicit SQL through
-`NamedParameterJdbcTemplate`, because dynamic filters, keyset conditions and full-text operators
-are clearer in SQL than in the Criteria API. Entities reference users and teams by id rather than
-associations, which avoids lazy loading and N+1 queries by construction.
+`overdue`) are server-side filters with matching (partial) indexes.
+
+All data access goes through JPA/Hibernate: every table has an entity and a Spring Data repository,
+and list, search and history queries are HQL built from the active filters and returned as
+projections (`Tuple`), not managed entities. Two PostgreSQL features have no JPA syntax, so they
+are added explicitly: full-text matching is a custom HQL function `fts(...)` registered with
+Hibernate (`PostgresFunctions`), and the idempotency key insert uses `ON CONFLICT DO NOTHING` as
+the project's single native query inside a JPA repository (decision 3). Hibernate 6 renders the
+cursor condition `(w.updatedAt, w.id) < (:at, :id)` as a row comparison, so the GIN and B-tree
+indexes are still used. Entities reference users and teams by id rather than associations, and
+queries use explicit entity joins, which avoids lazy loading and N+1 queries by construction.
 
 **Trade-offs.** No total counts or arbitrary "jump to page 37"; results are ordered by recency, not
-search relevance; English stemming only. Two persistence styles to understand.
+search relevance; English stemming only. The custom HQL function ties the queries to PostgreSQL
+(acceptable: PostgreSQL is a deliberate choice, see decision 1).
 
-**Where.** `WorkItemQueries`, `Cursor`, indexes in `V1__schema.sql`. Tests: `HistoryAndListTest`.
+**Where.** `WorkItemQueries`, `PostgresFunctions`, `Cursor`, indexes in `V1__schema.sql`.
+Tests: `HistoryAndListTest`.
 
 ---
 

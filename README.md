@@ -86,7 +86,7 @@ flowchart LR
         SEC[JWT authentication]
         CTRL[REST controllers<br/>+ Idempotency-Key]
         SVC[Services<br/>AuthorizationService · WorkflowPolicy]
-        Q[SQL read queries<br/>search · keyset pages]
+        Q[HQL read queries<br/>search · keyset pages]
         W[Outbox worker<br/>@Scheduled, SKIP LOCKED]
     end
     DB[(PostgreSQL<br/>items · activity_events · comments<br/>idempotency_keys · outbox_jobs · notifications)]
@@ -115,8 +115,8 @@ sequenceDiagram
     A->>D: INSERT outbox_jobs (NOTIFY_ASSIGNEE)
     A->>D: store response for the key, COMMIT
     A-->>B: 200 item (or 409/403: the UI rolls back and shows the reason)
-    W->>D: SELECT next job FOR UPDATE SKIP LOCKED
-    W->>D: INSERT notification ON CONFLICT DO NOTHING, mark job DONE, COMMIT
+    W->>D: lock next due job (FOR NO KEY UPDATE SKIP LOCKED)
+    W->>D: insert notification unless this job already sent it, mark job DONE, COMMIT
     B->>A: poll /api/notifications (assignee's browser)
 ```
 
@@ -144,7 +144,7 @@ cd backend
 ./mvnw test
 ```
 
-On Windows Command Prompt or PowerShell use `mvnw.cmd test`. The 35 tests call the real HTTP API
+On Windows Command Prompt or PowerShell use `mvnw.cmd test`. The 36 tests call the real HTTP API
 of a running server backed by real PostgreSQL. Row locks, conditional updates and `ON CONFLICT`
 cannot be verified against mocks or an in-memory database. Several tests fire 8–10 requests at the
 same instant to prove only one wins.
@@ -185,14 +185,14 @@ backend/   Spring Boot API
   src/main/java/com/newtonite/ops/
     auth/          login, JWT, security configuration
     authz/         AuthorizationService (all access decisions)
-    identity/      current user, teams and memberships
-    item/          work items: entity, service, workflow policy, SQL queries, controller
-    activity/      append-only history
+    identity/      users, teams, memberships (entities + repositories), current user
+    item/          work items: entity, repository, service, workflow policy, HQL queries, controller
+    activity/      append-only history (entity, repository, service)
     comment/       comments
     idempotency/   Idempotency-Key handling
     outbox/        transactional outbox and worker
-    notification/  notification handlers and API
-    common/        errors (problem+json), cursor pagination, JSON helpers
+    notification/  notification entity, handlers, service and API
+    common/        errors (problem+json), cursor pagination, JSON helpers, JPA config, HQL fts function
   src/main/resources/db/migration   schema (Flyway)
   src/main/resources/db/seed        demo data (not loaded by tests)
   src/test/java/...                 API-level integration tests

@@ -8,7 +8,7 @@ This is the design we build against. Product assumptions are in [ASSUMPTIONS.md]
 flowchart LR
     B[Browser<br/>React + TanStack Query] -- "REST /api + JWT<br/>Idempotency-Key, version" --> A[Spring Boot API]
     A -- "one transaction:<br/>item + activity event + outbox job" --> D[(PostgreSQL)]
-    W[Outbox worker<br/>@Scheduled, same app] -- "FOR UPDATE SKIP LOCKED" --> D
+    W[Outbox worker<br/>@Scheduled, same app] -- "lock job: SKIP LOCKED" --> D
     W -- "insert notification<br/>(idempotent)" --> D
 ```
 
@@ -17,9 +17,10 @@ flowchart LR
 * **PostgreSQL is the single source of truth.** Every state change, its activity
   event and its outbox job are written in **one transaction**, so history can never
   disagree with the item and a notification can never be lost.
-* **Writes use JPA entities** (with `@Version`). **List and search reads use SQL via
-  `NamedParameterJdbcTemplate`**, because keyset pagination and full-text search
-  are clearer in SQL than in the Criteria API.
+* **All data access uses JPA/Hibernate.** Every table has an entity and a Spring Data
+  repository; `WorkItem` uses `@Version`. List and search queries are HQL projections,
+  full-text matching is a custom HQL function (`fts`), and the only native query is the
+  idempotency key's `INSERT ... ON CONFLICT DO NOTHING`.
 
 ## 2. Data model
 
@@ -46,7 +47,7 @@ erDiagram
 | `comments` | Discussion on an item | `(item_id, created_at)` |
 | `idempotency_keys` | Stored responses of mutating requests | unique `(user_id, idem_key)` |
 | `outbox_jobs` | Async work written in the same transaction as the change | partial index `(run_after)` where `status = 'PENDING'` |
-| `notifications` | In-app notifications produced by the worker | unique `(source_job_id, user_id)` makes the handler idempotent |
+| `notifications` | In-app notifications produced by the worker | unique `(source_job_id, user_id)` backs up the handler's idempotency check |
 
 ## 3. Roles and permissions
 
@@ -148,7 +149,7 @@ Dashboard `view` values:
 | 3 | Repeated requests | `Idempotency-Key` row inserted **in the same transaction** as the action (`ON CONFLICT DO NOTHING`). A concurrent duplicate waits on the unique index, then replays the stored response. If the action fails, the key rolls back too, so retrying is allowed |
 | 4 | Workflow rules | Transition table above, enforced in `WorkflowPolicy` on the server |
 | 5 | Resource-level authorization | `AuthorizationService` checks role in the **item's** team; list queries are always filtered to the user's teams |
-| 6 | Reliable async work | Transactional outbox. Worker claims one job with `FOR UPDATE SKIP LOCKED`, runs the handler and marks it done in **one transaction**. A crash rolls back, so the job is retried. Failures back off exponentially and become `FAILED` after `max_attempts`. Handlers are idempotent via unique `(source_job_id, user_id)` |
+| 6 | Reliable async work | Transactional outbox. Worker claims one job with a JPA pessimistic lock and the skip-locked hint (`FOR NO KEY UPDATE SKIP LOCKED`), runs the handler and marks it done in **one transaction**. A crash rolls back, so the job is retried. Failures back off exponentially and become `FAILED` after `max_attempts`. Handlers are idempotent via unique `(source_job_id, user_id)` |
 | 7 | Optimistic UI | TanStack Query applies the change at once, rolls back on 409/403/422 and shows the server's reason |
 
 ## 7. Pagination and search
