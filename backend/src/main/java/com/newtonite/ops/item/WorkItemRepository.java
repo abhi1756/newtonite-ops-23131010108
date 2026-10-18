@@ -23,4 +23,6 @@ public interface WorkItemRepository extends JpaRepository<WorkItem, Long> {
             """)
     int claimIfUnassigned(@Param("id") long id, @Param("userId") long userId, @Param("now") Instant now,
                           @Param("claimable") Collection<Status> claimable);
+
+    long countByTeamId(Long teamId);
 }

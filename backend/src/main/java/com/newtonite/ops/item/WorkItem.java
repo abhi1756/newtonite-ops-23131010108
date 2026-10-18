@@ -67,6 +67,13 @@ public class WorkItem {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    /**
+     * Full-text search vector, computed by PostgreSQL from title and description (a generated column).
+     * Mapped read-only only so HQL queries can search it; the application never writes it.
+     */
+    @Column(name = "search_vector", columnDefinition = "tsvector", insertable = false, updatable = false)
+    private String searchVector;
+
     protected WorkItem() {
     }
 
