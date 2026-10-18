@@ -1,8 +1,9 @@
 package com.newtonite.ops.identity;
 
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
-import org.springframework.stereotype.Repository;
+import jakarta.persistence.EntityManager;
+import org.springframework.data.domain.Sort;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashMap;
 import java.util.List;
@@ -10,77 +11,72 @@ import java.util.Map;
 import java.util.Optional;
 
 /** Read access to users, teams and memberships. */
-@Repository
+@Service
+@Transactional(readOnly = true)
 public class UserDirectory {
 
-    private static final RowMapper<UserAccount> USER = (rs, i) -> new UserAccount(
-            rs.getLong("id"), rs.getString("email"), rs.getString("display_name"),
-            rs.getString("password_hash"), rs.getBoolean("is_admin"));
+    private final UserRepository users;
+    private final TeamRepository teams;
+    private final MembershipRepository memberships;
+    private final EntityManager em;
 
-    private final JdbcTemplate jdbc;
-
-    public UserDirectory(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
+    public UserDirectory(UserRepository users, TeamRepository teams, MembershipRepository memberships,
+                         EntityManager em) {
+        this.users = users;
+        this.teams = teams;
+        this.memberships = memberships;
+        this.em = em;
     }
 
     public Optional<UserAccount> findByEmail(String email) {
-        return jdbc.query("SELECT * FROM users WHERE lower(email) = lower(?)", USER, email.trim())
-                .stream().findFirst();
+        return users.findByEmailIgnoreCase(email.trim()).map(User::toAccount);
     }
 
     public Optional<UserAccount> findById(long id) {
-        return jdbc.query("SELECT * FROM users WHERE id = ?", USER, id).stream().findFirst();
+        return users.findById(id).map(User::toAccount);
     }
 
     public Map<Long, TeamRole> rolesOf(long userId) {
         Map<Long, TeamRole> roles = new HashMap<>();
-        jdbc.query("SELECT team_id, role FROM memberships WHERE user_id = ?",
-                rs -> {
-                    roles.put(rs.getLong("team_id"), TeamRole.valueOf(rs.getString("role")));
-                }, userId);
+        memberships.findByUserId(userId).forEach(m -> roles.put(m.getTeamId(), m.getRole()));
         return roles;
     }
 
     public Optional<TeamRole> roleOf(long userId, long teamId) {
-        return jdbc.query("SELECT role FROM memberships WHERE user_id = ? AND team_id = ?",
-                (rs, i) -> TeamRole.valueOf(rs.getString("role")), userId, teamId).stream().findFirst();
+        return memberships.findByUserIdAndTeamId(userId, teamId).map(Membership::getRole);
     }
 
     public CurrentUser loadCurrentUser(long userId) {
-        return findById(userId)
-                .map(u -> new CurrentUser(u.id(), u.email(), u.displayName(), u.admin(), rolesOf(u.id())))
+        return users.findById(userId)
+                .map(u -> new CurrentUser(u.getId(), u.getEmail(), u.getDisplayName(), u.isAdmin(), rolesOf(u.getId())))
                 .orElse(null);
     }
 
     /** Teams visible to the user with the user's effective role (admins see every team as LEAD). */
     public List<TeamMembership> teamsOf(CurrentUser user) {
         if (user.admin()) {
-            return jdbc.query("SELECT id, name FROM teams ORDER BY name",
-                    (rs, i) -> new TeamMembership(rs.getLong("id"), rs.getString("name"), TeamRole.LEAD));
+            return teams.findAll(Sort.by("name")).stream()
+                    .map(t -> new TeamMembership(t.getId(), t.getName(), TeamRole.LEAD))
+                    .toList();
         }
-        return jdbc.query("""
-                SELECT t.id, t.name, m.role FROM memberships m JOIN teams t ON t.id = m.team_id
-                WHERE m.user_id = ? ORDER BY t.name
-                """, (rs, i) -> new TeamMembership(rs.getLong("id"), rs.getString("name"),
-                TeamRole.valueOf(rs.getString("role"))), user.id());
+        return em.createQuery("""
+                        SELECT new com.newtonite.ops.identity.TeamMembership(t.id, t.name, m.role)
+                        FROM Membership m JOIN Team t ON t.id = m.teamId
+                        WHERE m.userId = :userId
+                        ORDER BY t.name
+                        """, TeamMembership.class)
+                .setParameter("userId", user.id())
+                .getResultList();
     }
 
     public List<TeamMember> membersOf(long teamId) {
-        return jdbc.query("""
-                SELECT u.id, u.display_name, m.role FROM memberships m JOIN users u ON u.id = m.user_id
-                WHERE m.team_id = ? ORDER BY u.display_name
-                """, (rs, i) -> new TeamMember(rs.getLong("id"), rs.getString("display_name"),
-                TeamRole.valueOf(rs.getString("role"))), teamId);
-    }
-
-    public Optional<String> teamName(long teamId) {
-        return jdbc.query("SELECT name FROM teams WHERE id = ?", (rs, i) -> rs.getString(1), teamId)
-                .stream().findFirst();
-    }
-
-    public record TeamMembership(long id, String name, TeamRole role) {
-    }
-
-    public record TeamMember(long id, String name, TeamRole role) {
+        return em.createQuery("""
+                        SELECT new com.newtonite.ops.identity.TeamMember(u.id, u.displayName, m.role)
+                        FROM Membership m JOIN User u ON u.id = m.userId
+                        WHERE m.teamId = :teamId
+                        ORDER BY u.displayName
+                        """, TeamMember.class)
+                .setParameter("teamId", teamId)
+                .getResultList();
     }
 }

@@ -26,12 +26,9 @@ public class Json {
         }
     }
 
-    public JsonNode read(String value) {
-        try {
-            return mapper.readTree(value);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not parse JSON", e);
-        }
+    /** Converts a JSONB value loaded by Hibernate (a Map) into a tree for convenient reading. */
+    public JsonNode toTree(Object value) {
+        return mapper.valueToTree(value);
     }
 
     /** Builds a map from key/value pairs; unlike Map.of it keeps insertion order and allows null values. */

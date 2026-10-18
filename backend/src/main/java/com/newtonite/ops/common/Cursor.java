@@ -2,8 +2,6 @@ package com.newtonite.ops.common;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 
@@ -32,10 +30,5 @@ public record Cursor(Instant at, long id) {
         } catch (RuntimeException e) {
             throw ApiException.badRequest("INVALID_CURSOR", "Cursor is invalid");
         }
-    }
-
-    /** JDBC-friendly form (the Postgres driver binds OffsetDateTime to timestamptz). */
-    public OffsetDateTime atUtc() {
-        return OffsetDateTime.ofInstant(at, ZoneOffset.UTC);
     }
 }

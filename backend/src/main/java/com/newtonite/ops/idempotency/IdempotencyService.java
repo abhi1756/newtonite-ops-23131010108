@@ -8,8 +8,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,8 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
+import java.time.Instant;
 import java.util.HexFormat;
 import java.util.function.Supplier;
 
@@ -42,13 +39,13 @@ public class IdempotencyService {
 
     private static final Logger log = LoggerFactory.getLogger(IdempotencyService.class);
 
-    private final NamedParameterJdbcTemplate jdbc;
+    private final IdempotencyKeyRepository keys;
     private final Json json;
     private final Duration retention;
 
-    public IdempotencyService(NamedParameterJdbcTemplate jdbc, Json json,
+    public IdempotencyService(IdempotencyKeyRepository keys, Json json,
                               @Value("${app.idempotency.retention}") Duration retention) {
-        this.jdbc = jdbc;
+        this.keys = keys;
         this.json = json;
         this.retention = retention;
     }
@@ -67,50 +64,36 @@ public class IdempotencyService {
             throw ApiException.badRequest("INVALID_IDEMPOTENCY_KEY", HEADER + " must be 1-100 characters");
         }
         String hash = sha256(operation + "\n" + (requestBody == null ? "" : json.write(requestBody)));
-        MapSqlParameterSource params = new MapSqlParameterSource("userId", user.id())
-                .addValue("key", key).addValue("hash", hash);
 
-        int inserted = jdbc.update("""
-                INSERT INTO idempotency_keys (user_id, idem_key, request_hash)
-                VALUES (:userId, :key, :hash)
-                ON CONFLICT (user_id, idem_key) DO NOTHING
-                """, params);
-
-        if (inserted == 1) {
+        if (keys.insertIfAbsent(user.id(), key, hash) == 1) {
             ResponseEntity<?> response = action.get();
-            params.addValue("status", response.getStatusCode().value())
-                    .addValue("body", response.getBody() == null ? null : json.write(response.getBody()));
-            jdbc.update("""
-                    UPDATE idempotency_keys SET response_status = :status, response_body = :body
-                    WHERE user_id = :userId AND idem_key = :key
-                    """, params);
+            IdempotencyKey stored = keys.findByUserIdAndKey(user.id(), key).orElseThrow();
+            stored.storeResponse(response.getStatusCode().value(),
+                    response.getBody() == null ? null : json.write(response.getBody()));   // saved at commit
             return response;
         }
 
-        StoredResponse stored = jdbc.queryForObject("""
-                SELECT request_hash, response_status, response_body FROM idempotency_keys
-                WHERE user_id = :userId AND idem_key = :key
-                """, params, (rs, i) -> new StoredResponse(rs.getString("request_hash"),
-                rs.getObject("response_status", Integer.class), rs.getString("response_body")));
-        if (!stored.requestHash().equals(hash)) {
+        IdempotencyKey stored = keys.findByUserIdAndKey(user.id(), key)
+                .orElseThrow(() -> ApiException.conflict("IDEMPOTENCY_KEY_IN_USE", "Please retry the request"));
+        if (!stored.getRequestHash().equals(hash)) {
             throw ApiException.unprocessable("IDEMPOTENCY_KEY_REUSED",
                     "This " + HEADER + " was already used for a different request");
         }
-        if (stored.status() == null) {
+        if (stored.getResponseStatus() == null) {
             throw ApiException.conflict("IDEMPOTENCY_KEY_IN_USE", "The original request is still being processed");
         }
         log.debug("Replaying stored response for idempotency key {} of user {}", key, user.id());
-        return ResponseEntity.status(stored.status())
+        return ResponseEntity.status(stored.getResponseStatus())
                 .contentType(MediaType.APPLICATION_JSON)
                 .header(REPLAYED_HEADER, "true")
-                .body(stored.body());
+                .body(stored.getResponseBody());
     }
 
     /** Keys only need to outlive realistic retries; old ones are purged so the table stays small. */
     @Scheduled(fixedDelayString = "PT1H", initialDelayString = "PT1M")
+    @Transactional
     public void purgeExpired() {
-        int deleted = jdbc.update("DELETE FROM idempotency_keys WHERE created_at < :cutoff",
-                new MapSqlParameterSource("cutoff", OffsetDateTime.now(ZoneOffset.UTC).minus(retention)));
+        int deleted = keys.deleteCreatedBefore(Instant.now().minus(retention));
         if (deleted > 0) {
             log.info("Purged {} expired idempotency keys", deleted);
         }
@@ -123,8 +106,5 @@ public class IdempotencyService {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
-    }
-
-    private record StoredResponse(String requestHash, Integer status, String body) {
     }
 }

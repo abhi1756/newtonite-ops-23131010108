@@ -1,17 +1,16 @@
 package com.newtonite.ops.outbox;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.newtonite.ops.common.Json;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -23,10 +22,11 @@ import java.util.stream.Collectors;
  * <ul>
  *   <li><b>One transaction per job:</b> lock the job, run the handler, mark it DONE, commit.
  *       If the process dies halfway, the transaction rolls back and the job is simply picked up again.</li>
- *   <li><b>Several workers are safe:</b> {@code FOR UPDATE SKIP LOCKED} gives each job to exactly one
- *       worker at a time; others skip it instead of waiting.</li>
+ *   <li><b>Several workers are safe:</b> the job is locked with "skip locked" (see
+ *       {@link OutboxJobRepository#lockDue}), so each job goes to exactly one worker at a time and others
+ *       move on instead of waiting.</li>
  *   <li><b>Failures:</b> recorded in a separate transaction with exponential backoff; after
- *       {@code max_attempts} the job is parked as FAILED for a human to inspect, so a poison job
+ *       {@code maxAttempts} the job is parked as FAILED for a human to inspect, so a poison job
  *       cannot block the queue.</li>
  * </ul>
  */
@@ -36,17 +36,17 @@ public class OutboxWorker {
     private static final Logger log = LoggerFactory.getLogger(OutboxWorker.class);
     private static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
 
-    private final NamedParameterJdbcTemplate jdbc;
+    private final OutboxJobRepository jobs;
     private final TransactionTemplate tx;
     private final Json json;
     private final Map<String, JobHandler> handlers;
     private final boolean enabled;
     private final int batchSize;
 
-    public OutboxWorker(NamedParameterJdbcTemplate jdbc, TransactionTemplate tx, Json json, List<JobHandler> handlers,
+    public OutboxWorker(OutboxJobRepository jobs, TransactionTemplate tx, Json json, List<JobHandler> handlers,
                         @Value("${app.outbox.enabled}") boolean enabled,
                         @Value("${app.outbox.batch-size}") int batchSize) {
-        this.jdbc = jdbc;
+        this.jobs = jobs;
         this.tx = tx;
         this.json = json;
         this.handlers = handlers.stream().collect(Collectors.toMap(JobHandler::type, Function.identity()));
@@ -70,23 +70,21 @@ public class OutboxWorker {
     public boolean processNext() {
         try {
             Boolean found = tx.execute(status -> {
-                Job job = lockNextDueJob();
-                if (job == null) {
+                List<OutboxJob> due = jobs.lockDue(OutboxJob.JobStatus.PENDING, Instant.now(), PageRequest.of(0, 1));
+                if (due.isEmpty()) {
                     return false;
                 }
-                JobHandler handler = handlers.get(job.type());
+                OutboxJob job = due.get(0);
+                JobHandler handler = handlers.get(job.getType());
                 try {
                     if (handler == null) {
-                        throw new IllegalStateException("No handler for job type " + job.type());
+                        throw new IllegalStateException("No handler for job type " + job.getType());
                     }
-                    handler.handle(job.id(), job.payload());
+                    handler.handle(job.getId(), json.toTree(job.getPayload()));
                 } catch (RuntimeException e) {
                     throw new JobFailedException(job, handler == null, e);   // rolls back the handler's writes
                 }
-                jdbc.update("""
-                        UPDATE outbox_jobs SET status = 'DONE', attempts = attempts + 1, last_error = NULL, updated_at = now()
-                        WHERE id = :id
-                        """, new MapSqlParameterSource("id", job.id()));
+                job.markDone();   // saved at commit by dirty checking
                 return true;
             });
             return Boolean.TRUE.equals(found);
@@ -96,43 +94,18 @@ public class OutboxWorker {
         }
     }
 
-    private Job lockNextDueJob() {
-        List<Job> jobs = jdbc.query("""
-                SELECT id, type, payload::text AS payload, attempts, max_attempts
-                FROM outbox_jobs
-                WHERE status = 'PENDING' AND run_after <= now()
-                ORDER BY run_after, id
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-                """, new MapSqlParameterSource(), (rs, i) -> new Job(rs.getLong("id"), rs.getString("type"),
-                json.read(rs.getString("payload")), rs.getInt("attempts"), rs.getInt("max_attempts")));
-        return jobs.isEmpty() ? null : jobs.get(0);
-    }
-
     private void recordFailure(JobFailedException e) {
-        Job job = e.job;
-        int attempts = job.attempts() + 1;
-        boolean giveUp = e.permanent || attempts >= job.maxAttempts();
+        int attempts = e.attempts + 1;
+        boolean giveUp = e.permanent || attempts >= e.maxAttempts;
         Duration backoff = backoff(attempts);
         String error = e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage();
-        tx.executeWithoutResult(status -> jdbc.update("""
-                UPDATE outbox_jobs
-                   SET attempts = :attempts,
-                       status = :status,
-                       last_error = left(:error, 2000),
-                       run_after = now() + make_interval(secs => :backoffSeconds),
-                       updated_at = now()
-                 WHERE id = :id
-                """, new MapSqlParameterSource("id", job.id())
-                .addValue("attempts", attempts)
-                .addValue("status", giveUp ? "FAILED" : "PENDING")
-                .addValue("error", error)
-                .addValue("backoffSeconds", (double) backoff.toSeconds())));
+        tx.executeWithoutResult(status -> jobs.findById(e.jobId)
+                .ifPresent(job -> job.recordFailure(error, giveUp, Instant.now().plus(backoff))));
         if (giveUp) {
-            log.error("Outbox job {} ({}) FAILED permanently after {} attempts: {}", job.id(), job.type(), attempts, error);
+            log.error("Outbox job {} ({}) FAILED permanently after {} attempts: {}", e.jobId, e.type, attempts, error);
         } else {
-            log.warn("Outbox job {} ({}) failed attempt {}/{}, retrying in {}s: {}", job.id(), job.type(), attempts,
-                    job.maxAttempts(), backoff.toSeconds(), error);
+            log.warn("Outbox job {} ({}) failed attempt {}/{}, retrying in {}s: {}", e.jobId, e.type, attempts,
+                    e.maxAttempts, backoff.toSeconds(), error);
         }
     }
 
@@ -142,16 +115,20 @@ public class OutboxWorker {
         return seconds > MAX_BACKOFF.toSeconds() ? MAX_BACKOFF : Duration.ofSeconds(seconds);
     }
 
-    record Job(long id, String type, JsonNode payload, int attempts, int maxAttempts) {
-    }
-
+    /** Carries what we need to record the failure after the job's transaction has been rolled back. */
     private static final class JobFailedException extends RuntimeException {
-        final Job job;
+        final long jobId;
+        final String type;
+        final int attempts;
+        final int maxAttempts;
         final boolean permanent;
 
-        JobFailedException(Job job, boolean permanent, RuntimeException cause) {
+        JobFailedException(OutboxJob job, boolean permanent, RuntimeException cause) {
             super(cause);
-            this.job = job;
+            this.jobId = job.getId();
+            this.type = job.getType();
+            this.attempts = job.getAttempts();
+            this.maxAttempts = job.getMaxAttempts();
             this.permanent = permanent;
         }
     }

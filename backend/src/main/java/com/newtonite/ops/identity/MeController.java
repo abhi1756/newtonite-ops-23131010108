@@ -27,12 +27,12 @@ public class MeController {
 
     /** Members of a team, e.g. for the "assign to" picker. Only visible to people in that team. */
     @GetMapping("/teams/{teamId}/members")
-    public List<UserDirectory.TeamMember> members(CurrentUser user, @PathVariable long teamId) {
+    public List<TeamMember> members(CurrentUser user, @PathVariable long teamId) {
         authz.requireVisible(user, teamId, "Team");
         return users.membersOf(teamId);
     }
 
     public record Me(long id, String email, String displayName, boolean admin,
-                     List<UserDirectory.TeamMembership> teams) {
+                     List<TeamMembership> teams) {
     }
 }

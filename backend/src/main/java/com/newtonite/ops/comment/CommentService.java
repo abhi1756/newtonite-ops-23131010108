@@ -7,13 +7,13 @@ import com.newtonite.ops.common.PageResponse;
 import com.newtonite.ops.identity.CurrentUser;
 import com.newtonite.ops.identity.TeamRole;
 import com.newtonite.ops.item.WorkItemService;
-import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.Tuple;
+import jakarta.persistence.TypedQuery;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.time.OffsetDateTime;
 import java.util.List;
 
 import static com.newtonite.ops.common.Json.obj;
@@ -25,12 +25,15 @@ import static com.newtonite.ops.common.Json.obj;
 @Service
 public class CommentService {
 
-    private final NamedParameterJdbcTemplate jdbc;
+    private final CommentRepository comments;
+    private final EntityManager em;
     private final WorkItemService items;
     private final ActivityService activity;
 
-    public CommentService(NamedParameterJdbcTemplate jdbc, WorkItemService items, ActivityService activity) {
-        this.jdbc = jdbc;
+    public CommentService(CommentRepository comments, EntityManager em, WorkItemService items,
+                          ActivityService activity) {
+        this.comments = comments;
+        this.em = em;
         this.items = items;
         this.activity = activity;
     }
@@ -42,36 +45,33 @@ public class CommentService {
             throw ApiException.forbidden("A " + loaded.role() + " of this team cannot comment");
         }
         String text = body.trim();
-        CommentEntry entry = jdbc.queryForObject("""
-                INSERT INTO comments (item_id, author_id, body) VALUES (:itemId, :authorId, :body)
-                RETURNING id, created_at
-                """, new MapSqlParameterSource("itemId", itemId).addValue("authorId", user.id()).addValue("body", text),
-                (rs, i) -> new CommentEntry(rs.getLong("id"), text, user.id(), user.displayName(),
-                        rs.getObject("created_at", OffsetDateTime.class).toInstant()));
+        Comment comment = comments.save(new Comment(itemId, user.id(), text));
         activity.record(itemId, user.id(), "COMMENTED",
-                obj("commentId", entry.id(), "excerpt", text.length() > 80 ? text.substring(0, 80) + "..." : text));
-        return entry;
+                obj("commentId", comment.getId(), "excerpt", text.length() > 80 ? text.substring(0, 80) + "..." : text));
+        return new CommentEntry(comment.getId(), text, user.id(), user.displayName(), comment.getCreatedAt());
     }
 
     @Transactional(readOnly = true)
     public PageResponse<CommentEntry> list(CurrentUser user, long itemId, String cursorValue, int limit) {
         items.loadVisible(user, itemId);
         Cursor cursor = Cursor.decode(cursorValue);
-        MapSqlParameterSource params = new MapSqlParameterSource("itemId", itemId).addValue("limit", limit + 1);
-        String cursorClause = "";
+        String cursorClause = cursor == null ? "" : "AND (c.createdAt, c.id) < (:cAt, :cId)";
+        TypedQuery<Tuple> query = em.createQuery("""
+                SELECT c.id AS id, c.body AS body, c.authorId AS authorId, u.displayName AS authorName,
+                       c.createdAt AS createdAt
+                FROM Comment c JOIN User u ON u.id = c.authorId
+                WHERE c.itemId = :itemId %s
+                ORDER BY c.createdAt DESC, c.id DESC
+                """.formatted(cursorClause), Tuple.class)
+                .setParameter("itemId", itemId)
+                .setMaxResults(limit + 1);
         if (cursor != null) {
-            cursorClause = "AND (c.created_at, c.id) < (:cAt, :cId)";
-            params.addValue("cAt", cursor.atUtc()).addValue("cId", cursor.id());
+            query.setParameter("cAt", cursor.at()).setParameter("cId", cursor.id());
         }
-        List<CommentEntry> rows = jdbc.query("""
-                SELECT c.id, c.body, c.author_id, u.display_name, c.created_at
-                FROM comments c JOIN users u ON u.id = c.author_id
-                WHERE c.item_id = :itemId %s
-                ORDER BY c.created_at DESC, c.id DESC
-                LIMIT :limit
-                """.formatted(cursorClause), params, (rs, i) -> new CommentEntry(rs.getLong("id"),
-                rs.getString("body"), rs.getLong("author_id"), rs.getString("display_name"),
-                rs.getObject("created_at", OffsetDateTime.class).toInstant()));
+        List<CommentEntry> rows = query.getResultList().stream().map(t -> new CommentEntry(
+                t.get("id", Long.class), t.get("body", String.class), t.get("authorId", Long.class),
+                t.get("authorName", String.class), t.get("createdAt", Instant.class))).toList();
+
         String next = null;
         if (rows.size() > limit) {
             rows = rows.subList(0, limit);
