@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class WorkflowTest extends IntegrationTest {
 
     private Response transition(TestUser user, long id, String to, String note) {
-        long version = jdbc.queryForObject("SELECT version FROM work_items WHERE id = ?", Long.class, id);
+        long version = item(id).getVersion();
         Map<String, Object> body = new HashMap<>(Map.of("to", to, "version", version));
         if (note != null) {
             body.put("note", note);
@@ -25,7 +25,7 @@ class WorkflowTest extends IntegrationTest {
     }
 
     private String status(long id) {
-        return jdbc.queryForObject("SELECT status FROM work_items WHERE id = ?", String.class, id);
+        return item(id).getStatus().name();
     }
 
     @Test

@@ -3,13 +3,21 @@ package com.newtonite.ops.support;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.newtonite.ops.auth.JwtService;
+import com.newtonite.ops.activity.ActivityEventRepository;
+import com.newtonite.ops.identity.Membership;
+import com.newtonite.ops.identity.MembershipRepository;
+import com.newtonite.ops.identity.Team;
+import com.newtonite.ops.identity.TeamRepository;
 import com.newtonite.ops.identity.TeamRole;
-import com.newtonite.ops.identity.UserAccount;
+import com.newtonite.ops.identity.User;
+import com.newtonite.ops.identity.UserRepository;
+import com.newtonite.ops.item.WorkItem;
+import com.newtonite.ops.item.WorkItemRepository;
+import com.newtonite.ops.outbox.OutboxJobRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import java.net.URI;
@@ -48,9 +56,19 @@ public abstract class IntegrationTest {
     @LocalServerPort
     protected int port;
     @Autowired
-    protected JdbcTemplate jdbc;
-    @Autowired
     protected ObjectMapper mapper;
+    @Autowired
+    protected WorkItemRepository workItems;
+    @Autowired
+    protected OutboxJobRepository outboxJobs;
+    @Autowired
+    private UserRepository users;
+    @Autowired
+    private TeamRepository teams;
+    @Autowired
+    private MembershipRepository memberships;
+    @Autowired
+    private ActivityEventRepository activityEvents;
     @Autowired
     private JwtService jwtService;
 
@@ -62,19 +80,16 @@ public abstract class IntegrationTest {
     }
 
     protected long newTeam() {
-        return jdbc.queryForObject("INSERT INTO teams (name) VALUES (?) RETURNING id", Long.class,
-                "team-" + SEQUENCE.incrementAndGet());
+        return teams.save(new Team("team-" + SEQUENCE.incrementAndGet())).getId();
     }
 
     protected TestUser newUser(String label, boolean admin) {
         long n = SEQUENCE.incrementAndGet();
         String email = label + "-" + n + "@test.local";
         String name = label + " " + n;
-        long id = jdbc.queryForObject("""
-                INSERT INTO users (email, display_name, password_hash, is_admin) VALUES (?, ?, ?, ?) RETURNING id
-                """, Long.class, email, name, PASSWORD_HASH, admin);
-        String token = jwtService.issue(new UserAccount(id, email, name, PASSWORD_HASH, admin)).token();
-        return new TestUser(id, email, name, token);
+        User user = users.save(new User(email, name, PASSWORD_HASH, admin));
+        String token = jwtService.issue(user.toAccount()).token();
+        return new TestUser(user.getId(), email, name, token);
     }
 
     protected TestUser member(long teamId, TeamRole role) {
@@ -84,7 +99,7 @@ public abstract class IntegrationTest {
     }
 
     protected void addMembership(TestUser user, long teamId, TeamRole role) {
-        jdbc.update("INSERT INTO memberships (user_id, team_id, role) VALUES (?, ?, ?)", user.id(), teamId, role.name());
+        memberships.save(new Membership(user.id(), teamId, role));
     }
 
     /** Creates an item through the API and returns its JSON. */
@@ -99,14 +114,19 @@ public abstract class IntegrationTest {
         return createItem(user, teamId, type, "Item " + SEQUENCE.incrementAndGet());
     }
 
+    /** The item as currently stored (a fresh read, outside any transaction). */
+    protected WorkItem item(long id) {
+        return workItems.findById(id).orElseThrow();
+    }
+
     protected int countEvents(long itemId, String type) {
-        return jdbc.queryForObject("SELECT count(*) FROM activity_events WHERE item_id = ? AND type = ?",
-                Integer.class, itemId, type);
+        return (int) activityEvents.countByItemIdAndType(itemId, type);
     }
 
     protected int countJobs(String type, long itemId) {
-        return jdbc.queryForObject("SELECT count(*) FROM outbox_jobs WHERE type = ? AND (payload->>'itemId')::bigint = ?",
-                Integer.class, type, itemId);
+        return (int) outboxJobs.findByType(type).stream()
+                .filter(job -> ((Number) job.getPayload().get("itemId")).longValue() == itemId)
+                .count();
     }
 
     // ------------------------------------------------------------------ HTTP

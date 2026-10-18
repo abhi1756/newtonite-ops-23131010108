@@ -2,15 +2,26 @@ package com.newtonite.ops;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.newtonite.ops.identity.TeamRole;
+import com.newtonite.ops.notification.NotificationRepository;
+import com.newtonite.ops.outbox.OutboxJob;
+import com.newtonite.ops.outbox.OutboxJob.JobStatus;
 import com.newtonite.ops.outbox.OutboxWorker;
 import com.newtonite.ops.support.IntegrationTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -23,6 +34,10 @@ class OutboxWorkerTest extends IntegrationTest {
 
     @Autowired
     private OutboxWorker worker;
+    @Autowired
+    private NotificationRepository notifications;
+    @Autowired
+    private TransactionTemplate tx;
 
     private void drain() {
         while (worker.processNext()) {
@@ -30,18 +45,27 @@ class OutboxWorkerTest extends IntegrationTest {
         }
     }
 
-    private long insertJob(String type, String payloadJson, int maxAttempts) {
-        return jdbc.queryForObject("""
-                INSERT INTO outbox_jobs (type, payload, max_attempts) VALUES (?, CAST(? AS jsonb), ?) RETURNING id
-                """, Long.class, type, payloadJson, maxAttempts);
+    private long insertJob(String type, Map<String, Object> payload, int maxAttempts) {
+        return outboxJobs.save(new OutboxJob(type, payload, maxAttempts)).getId();
     }
 
-    private String jobStatus(long jobId) {
-        return jdbc.queryForObject("SELECT status FROM outbox_jobs WHERE id = ?", String.class, jobId);
+    private OutboxJob job(long jobId) {
+        return outboxJobs.findById(jobId).orElseThrow();
     }
 
-    private int notificationsFor(TestUser user) {
-        return jdbc.queryForObject("SELECT count(*) FROM notifications WHERE user_id = ?", Integer.class, user.id());
+    /** Makes a delayed job due now, instead of waiting for its backoff. */
+    private void makeDue(long jobId) {
+        OutboxJob job = job(jobId);
+        job.setRunAfter(Instant.now().minusSeconds(1));
+        outboxJobs.save(job);
+    }
+
+    private long notificationsFor(TestUser user) {
+        return notifications.countByUserId(user.id());
+    }
+
+    private static Map<String, Object> notifyPayload(long itemId, long userId) {
+        return Map.of("itemId", itemId, "userId", userId, "title", "t", "actorName", "Lead");
     }
 
     @Test
@@ -73,15 +97,16 @@ class OutboxWorkerTest extends IntegrationTest {
         TestUser lead = member(team, TeamRole.LEAD);
         TestUser member = member(team, TeamRole.MEMBER);
         long itemId = createItem(lead, team, "TASK").get("id").asLong();
-        long jobId = insertJob("NOTIFY_ASSIGNEE", """
-                {"itemId": %d, "userId": %d, "title": "t", "actorName": "Lead"}""".formatted(itemId, member.id()), 5);
+        long jobId = insertJob("NOTIFY_ASSIGNEE", notifyPayload(itemId, member.id()), 5);
 
         drain();
         // Simulate redelivery, e.g. the worker crashed after the handler ran but before the job was marked DONE.
-        jdbc.update("UPDATE outbox_jobs SET status = 'PENDING' WHERE id = ?", jobId);
+        OutboxJob done = job(jobId);
+        done.setStatus(JobStatus.PENDING);
+        outboxJobs.save(done);
         drain();
 
-        assertThat(jobStatus(jobId)).isEqualTo("DONE");
+        assertThat(job(jobId).getStatus()).isEqualTo(JobStatus.DONE);
         assertThat(notificationsFor(member)).isEqualTo(1);
     }
 
@@ -91,36 +116,74 @@ class OutboxWorkerTest extends IntegrationTest {
         TestUser lead = member(team, TeamRole.LEAD);
         long itemId = createItem(lead, team, "TASK").get("id").asLong();
         // Recipient does not exist: the insert violates a foreign key every time.
-        long jobId = insertJob("NOTIFY_ASSIGNEE", """
-                {"itemId": %d, "userId": 999999999, "title": "t", "actorName": "Lead"}""".formatted(itemId), 3);
+        long jobId = insertJob("NOTIFY_ASSIGNEE", notifyPayload(itemId, 999_999_999L), 3);
 
         drain();
-        assertThat(jobStatus(jobId)).isEqualTo("PENDING");
-        assertThat(jdbc.queryForObject("SELECT attempts FROM outbox_jobs WHERE id = ?", Integer.class, jobId)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT run_after > now() FROM outbox_jobs WHERE id = ?", Boolean.class, jobId))
-                .as("next attempt is delayed").isTrue();
+        OutboxJob afterFirst = job(jobId);
+        assertThat(afterFirst.getStatus()).isEqualTo(JobStatus.PENDING);
+        assertThat(afterFirst.getAttempts()).isEqualTo(1);
+        assertThat(afterFirst.getRunAfter()).as("next attempt is delayed").isAfter(Instant.now());
 
         for (int attempt = 2; attempt <= 3; attempt++) {
-            jdbc.update("UPDATE outbox_jobs SET run_after = now() WHERE id = ?", jobId);   // skip the wait
+            makeDue(jobId);
             drain();
         }
 
-        assertThat(jobStatus(jobId)).isEqualTo("FAILED");
-        assertThat(jdbc.queryForObject("SELECT attempts FROM outbox_jobs WHERE id = ?", Integer.class, jobId)).isEqualTo(3);
-        assertThat(jdbc.queryForObject("SELECT last_error FROM outbox_jobs WHERE id = ?", String.class, jobId)).isNotBlank();
-        jdbc.update("UPDATE outbox_jobs SET run_after = now() WHERE id = ?", jobId);
+        OutboxJob parked = job(jobId);
+        assertThat(parked.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(parked.getAttempts()).isEqualTo(3);
+        assertThat(parked.getLastError()).isNotBlank();
+        makeDue(jobId);
         drain();
-        assertThat(jdbc.queryForObject("SELECT attempts FROM outbox_jobs WHERE id = ?", Integer.class, jobId))
-                .as("FAILED jobs are not picked up again").isEqualTo(3);
+        assertThat(job(jobId).getAttempts()).as("FAILED jobs are not picked up again").isEqualTo(3);
     }
 
     @Test
     void unknownJobTypesFailImmediatelyInsteadOfRetrying() {
-        long jobId = insertJob("NO_SUCH_TYPE", "{}", 5);
+        long jobId = insertJob("NO_SUCH_TYPE", Map.of(), 5);
 
         drain();
 
-        assertThat(jobStatus(jobId)).isEqualTo("FAILED");
+        assertThat(job(jobId).getStatus()).isEqualTo(JobStatus.FAILED);
+    }
+
+    @Test
+    void aJobLockedByAnotherWorkerIsSkippedNotWaitedFor() throws Exception {
+        long team = newTeam();
+        TestUser lead = member(team, TeamRole.LEAD);
+        TestUser member = member(team, TeamRole.MEMBER);
+        long itemId = createItem(lead, team, "TASK").get("id").asLong();
+        drain();
+        long first = insertJob("NOTIFY_ASSIGNEE", notifyPayload(itemId, member.id()), 5);
+        long second = insertJob("NOTIFY_ASSIGNEE", notifyPayload(itemId, member.id()), 5);
+
+        // Another "worker" locks the first job and keeps its transaction open.
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        try {
+            Future<Long> holder = threads.submit(() -> tx.execute(status -> {
+                List<OutboxJob> mine = outboxJobs.lockDue(JobStatus.PENDING, Instant.now(), PageRequest.of(0, 1));
+                locked.countDown();
+                awaitQuietly(release);
+                return mine.get(0).getId();
+            }));
+            locked.await();
+
+            // Without SKIP LOCKED this call would block until the other transaction ends (and time out here).
+            Future<Boolean> processed = threads.submit(worker::processNext);
+            assertThat(processed.get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(job(second).getStatus()).isEqualTo(JobStatus.DONE);
+            assertThat(job(first).getStatus()).isEqualTo(JobStatus.PENDING);
+
+            release.countDown();
+            assertThat(holder.get(5, TimeUnit.SECONDS)).isEqualTo(first);
+        } finally {
+            release.countDown();
+            threads.shutdownNow();
+        }
+        drain();
+        assertThat(job(first).getStatus()).isEqualTo(JobStatus.DONE);
     }
 
     @Test
@@ -132,8 +195,7 @@ class OutboxWorkerTest extends IntegrationTest {
         drain();
         List<Long> jobs = new ArrayList<>();
         for (int i = 0; i < 30; i++) {
-            jobs.add(insertJob("NOTIFY_ASSIGNEE", """
-                    {"itemId": %d, "userId": %d, "title": "job %d", "actorName": "Lead"}""".formatted(itemId, member.id(), i), 5));
+            jobs.add(insertJob("NOTIFY_ASSIGNEE", notifyPayload(itemId, member.id()), 5));
         }
 
         List<Callable<Boolean>> workers = new ArrayList<>();
@@ -146,10 +208,18 @@ class OutboxWorkerTest extends IntegrationTest {
         runConcurrently(workers);
 
         for (long jobId : jobs) {
-            assertThat(jobStatus(jobId)).isEqualTo("DONE");
-            assertThat(jdbc.queryForObject("SELECT attempts FROM outbox_jobs WHERE id = ?", Integer.class, jobId))
-                    .as("job %d handled by exactly one worker", jobId).isEqualTo(1);
+            OutboxJob job = job(jobId);
+            assertThat(job.getStatus()).isEqualTo(JobStatus.DONE);
+            assertThat(job.getAttempts()).as("job %d handled by exactly one worker", jobId).isEqualTo(1);
         }
         assertThat(notificationsFor(member)).isEqualTo(30);
+    }
+
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

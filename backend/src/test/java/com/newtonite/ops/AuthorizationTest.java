@@ -74,7 +74,7 @@ class AuthorizationTest extends IntegrationTest {
 
         assertThat(edit.status()).isEqualTo(403);
         assertThat(assign.status()).isEqualTo(403);
-        assertThat(jdbc.queryForObject("SELECT assignee_id FROM work_items WHERE id = ?", Long.class, id)).isEqualTo(owner.id());
+        assertThat(item(id).getAssigneeId()).isEqualTo(owner.id());
     }
 
     @Test

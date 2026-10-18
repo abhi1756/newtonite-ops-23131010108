@@ -23,7 +23,7 @@ class IdempotencyTest extends IntegrationTest {
     }
 
     private int itemsInTeam(long team) {
-        return jdbc.queryForObject("SELECT count(*) FROM work_items WHERE team_id = ?", Integer.class, team);
+        return (int) workItems.countByTeamId(team);
     }
 
     @Test

@@ -43,10 +43,10 @@ class ConcurrencyTest extends IntegrationTest {
             }
         }
         assertThat(winners).hasSize(1);
-        long assignee = jdbc.queryForObject("SELECT assignee_id FROM work_items WHERE id = ?", Long.class, itemId);
+        long assignee = item(itemId).getAssigneeId();
         assertThat(assignee).isEqualTo(winners.get(0));
         assertThat(countEvents(itemId, "ASSIGNED")).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT version FROM work_items WHERE id = ?", Long.class, itemId)).isEqualTo(1L);
+        assertThat(item(itemId).getVersion()).isEqualTo(1L);
     }
 
     @Test
@@ -83,7 +83,7 @@ class ConcurrencyTest extends IntegrationTest {
         assertThat(stale.code()).isEqualTo("STALE_VERSION");
         assertThat(stale.body().get("current").get("title").asText()).isEqualTo("First edit");
         assertThat(stale.body().get("current").get("version").asLong()).isEqualTo(v0 + 1);
-        assertThat(jdbc.queryForObject("SELECT title FROM work_items WHERE id = ?", String.class, id)).isEqualTo("First edit");
+        assertThat(item(id).getTitle()).isEqualTo("First edit");
         assertThat(countEvents(id, "UPDATED")).isEqualTo(1);
     }
 
@@ -105,7 +105,7 @@ class ConcurrencyTest extends IntegrationTest {
         assertThat(results).filteredOn(r -> r.status() == 200).hasSize(1);
         assertThat(results).filteredOn(r -> r.status() != 200)
                 .allSatisfy(r -> assertThat(r.code()).as(r.toString()).isEqualTo("STALE_VERSION"));
-        assertThat(jdbc.queryForObject("SELECT version FROM work_items WHERE id = ?", Long.class, id)).isEqualTo(version + 1);
+        assertThat(item(id).getVersion()).isEqualTo(version + 1);
         assertThat(countEvents(id, "UPDATED")).isEqualTo(1);
     }
 
